@@ -1,0 +1,29 @@
+
+# Python virtual environment
+venv/
+.venv/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+
+# Pytest cache
+.pytest_cache/
+
+# IDE and local environment files
+.vscode/
+.idea/
+.env
+
+# Private keys - never publish these
+private_key.pem
+root_ca_key.pem
+server_key.pem
+
+# Generated test certificates
+certificate.pem
+root_ca.pem
+server_certificate.pem
+
+# Generated JSON reports
+*_report.json

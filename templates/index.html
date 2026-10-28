@@ -1,0 +1,116 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>X.509 Certificate Validator</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script src="{{ url_for('static', filename='script.js') }}" defer></script>
+</head>
+<body>
+    <header class="topbar">
+        <a class="brand" href="/">
+            <span class="brand-icon">✦</span>
+            CertiCheck
+        </a>
+        <span class="top-label">X.509 SECURITY TOOL</span>
+    </header>
+
+    <main class="container">
+        <section class="hero">
+            <div class="eyebrow">CERTIFICATE ANALYSIS</div>
+            <h1>Verify your digital certificates.</h1>
+            <p>Inspect certificate details, verify hostnames, and check trust chains from one place.</p>
+        </section>
+
+        <section class="panel">
+            <div class="panel-heading">
+                <div>
+                    <h2>Analyze a certificate</h2>
+                    <p>Choose a PEM certificate and configure the validation options.</p>
+                </div>
+                <span class="lock-icon">♢</span>
+            </div>
+
+            <form id="certificate-form">
+                <label for="certificate">Certificate file <span class="required">*</span></label>
+                <input id="certificate" name="certificate" type="file"
+                       accept=".pem,.crt,.cer" required>
+
+                <label for="hostname">Expected hostname or IP address</label>
+                <input id="hostname" name="hostname" type="text"
+                       placeholder="e.g. localhost">
+
+                <details>
+                    <summary>Advanced trust settings</summary>
+                    <div class="advanced-fields">
+                        <label for="issuer">Issuer / intermediate certificate (optional)</label>
+                        <input id="issuer" name="issuer" type="file"
+                               accept=".pem,.crt,.cer">
+
+                        <label for="roots">Trusted root certificate bundle (optional)</label>
+                        <input id="roots" name="roots" type="file"
+                               accept=".pem,.crt,.cer">
+                        <p class="hint">For your generated test chain, select root_ca.pem as the trusted root.</p>
+                    </div>
+                </details>
+
+                <button id="submit-button" type="submit">Analyze certificate <span>→</span></button>
+            </form>
+
+            <div id="message" class="message" role="status" aria-live="polite"></div>
+        </section>
+
+        <section id="results" class="results hidden">
+            <div class="results-heading">
+                <div>
+                    <div class="eyebrow">ANALYSIS REPORT</div>
+                    <h2 id="result-title">Validation results</h2>
+                </div>
+                <a id="download-link" class="download-button" href="/api/report">Download JSON ↓</a>
+            </div>
+
+            <div id="status-banner" class="status-banner"></div>
+
+            <div class="result-grid">
+                <article class="result-card">
+                    <span class="card-label">SIGNATURE</span>
+                    <strong id="signature-status">—</strong>
+                    <p id="signature-details"></p>
+                </article>
+                <article class="result-card">
+                    <span class="card-label">HOSTNAME</span>
+                    <strong id="hostname-status">—</strong>
+                    <p id="hostname-details"></p>
+                </article>
+                <article class="result-card">
+                    <span class="card-label">CERTIFICATE CHAIN</span>
+                    <strong id="chain-status">—</strong>
+                    <p id="chain-details"></p>
+                </article>
+            </div>
+
+            <article class="details-card">
+                <h3>Certificate details</h3>
+                <dl id="certificate-details"></dl>
+            </article>
+
+            <article class="details-card">
+                <h3>Subject Alternative Names</h3>
+                <div id="san-details"></div>
+            </article>
+
+            <p class="disclaimer">
+                A successful result applies only to the checks performed using the
+                supplied hostname and trust configuration. This tool does not establish
+                that a website or certificate is safe in every context.
+            </p>
+        </section>
+
+        <footer>
+            X.509 Certificate Parser &amp; Validator · Local analysis tool
+        </footer>
+    </main>
+</body>
+</html>
