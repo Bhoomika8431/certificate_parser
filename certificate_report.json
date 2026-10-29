@@ -1,0 +1,37 @@
+{
+    "file": "certificate.pem",
+    "version": "v3",
+    "serial_number": "232025447238869796590419595058361102767587345935",
+    "subject": "organizationName=X509 Parser Test, commonName=localhost",
+    "issuer": "organizationName=X509 Parser Test, commonName=localhost",
+    "valid_from": "2026-10-20T11:58:49+00:00",
+    "valid_until": "2026-11-19T11:59:49+00:00",
+    "validity_status": "WITHIN VALIDITY DATES",
+    "public_key": {
+        "algorithm": "RSA",
+        "key_size": 2048,
+        "public_exponent": 65537
+    },
+    "signature_algorithm": "sha256WithRSAEncryption",
+    "signature_hash": "sha256",
+    "subject_alternative_names": {
+        "dns": [
+            "localhost"
+        ],
+        "ip_addresses": []
+    },
+    "validation": {
+        "signature": {
+            "status": "PASSED",
+            "details": "Certificate signature is mathematically valid."
+        },
+        "hostname": {
+            "status": "PASSED",
+            "details": "Certificate matches localhost."
+        },
+        "chain": {
+            "status": "PASSED",
+            "details": "Trusted chain verified (1 certificates in the verified path)."
+        }
+    }
+}

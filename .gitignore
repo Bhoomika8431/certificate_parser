@@ -13,17 +13,3 @@ __pycache__/
 .vscode/
 .idea/
 .env
-
-# Private keys - never publish these
-private_key.pem
-root_ca_key.pem
-server_key.pem
-*.key
-
-# Generated test certificates
-certificate.pem
-root_ca.pem
-server_certificate.pem
-
-# Generated JSON reports
-*_report.json

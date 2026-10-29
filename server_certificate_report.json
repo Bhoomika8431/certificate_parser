@@ -1,0 +1,37 @@
+{
+    "file": "server_certificate.pem",
+    "generated_at": "2026-10-29T04:39:05.403764+00:00",
+    "validity_status": "WITHIN VALIDITY DATES",
+    "certificate_details": {
+        "subject": "CN=localhost,O=X509 Parser Test",
+        "issuer": "CN=X509 Test Root CA,O=X509 Test CA",
+        "serial_number": "144761735101075503714296872401422848961718000777",
+        "not_before": "2026-10-29T04:38:03+00:00",
+        "not_after": "2026-11-28T04:39:03+00:00",
+        "signature_algorithm": "sha256",
+        "public_key": {
+            "type": "RSAPublicKey",
+            "algorithm": "RSAPublicKey",
+            "key_size": 2048
+        },
+        "dns_names": [
+            "localhost"
+        ],
+        "ip_addresses": []
+    },
+    "validation": {
+        "signature": {
+            "status": "PASSED",
+            "details": "Certificate signature is valid."
+        },
+        "hostname": {
+            "status": "PASSED",
+            "details": "Certificate matches hostname localhost."
+        },
+        "chain": {
+            "status": "PASSED",
+            "details": "Trusted chain verified (2 certificates in verified path)."
+        }
+    },
+    "overall_result": "PASSED"
+}
