@@ -8,10 +8,7 @@ from pathlib import Path
 
 import certifi
 from cryptography import x509
-from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import (
-    dsa,
     ec,
     ed25519,
     ed448,
@@ -22,121 +19,135 @@ from cryptography.x509.verification import PolicyBuilder, Store, VerificationErr
 
 
 def get_name(name):
-    """Convert an X.509 name into readable text."""
-    return ", ".join(
-        f"{attribute.oid._name or attribute.oid.dotted_string}="
-        f"{attribute.value}"
-        for attribute in name
-    )
+    """Return a readable X.509 distinguished name."""
+    return name.rfc4514_string() if name else "Not available"
 
 
-def load_certificate(file_path):
-    """Load one PEM-encoded X.509 certificate."""
-    path = Path(file_path)
-    return x509.load_pem_x509_certificate(path.read_bytes())
-
-
-def load_certificates(file_path):
-    """Load one or more PEM certificates from a file."""
-    path = Path(file_path)
-    return x509.load_pem_x509_certificates(path.read_bytes())
-
-
-def get_public_key_details(key):
-    """Extract public-key algorithm information."""
-    details = {
+def get_public_key_details(cert):
+    """Return public-key information for display."""
+    key = cert.public_key()
+    result = {
+        "type": type(key).__name__,
         "algorithm": type(key).__name__,
-        "key_size": getattr(key, "key_size", None),
     }
-
-    if isinstance(key, rsa.RSAPublicKey):
-        details.update({
-            "algorithm": "RSA",
-            "public_exponent": key.public_numbers().e,
-        })
-    elif isinstance(key, ec.EllipticCurvePublicKey):
-        details.update({
-            "algorithm": "Elliptic Curve",
-            "curve": key.curve.name,
-        })
-    elif isinstance(key, dsa.DSAPublicKey):
-        details["algorithm"] = "DSA"
-    elif isinstance(key, ed25519.Ed25519PublicKey):
-        details["algorithm"] = "Ed25519"
-    elif isinstance(key, ed448.Ed448PublicKey):
-        details["algorithm"] = "Ed448"
-
-    return details
+    if hasattr(key, "key_size"):
+        result["key_size"] = key.key_size
+    return result
 
 
-def verify_signature(cert, issuer_cert=None):
-    """Verify a certificate's signature using its issuer's public key."""
-    if issuer_cert is None:
-        if cert.subject != cert.issuer:
-            return {
-                "status": "NOT CHECKED",
-                "details": (
-                    "Provide the issuer certificate using --issuer."
-                ),
-            }
-        issuer_cert = cert
+def load_certificate(path):
+    """Load a single PEM or DER certificate."""
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"File not found: {path}")
 
-    if cert.issuer != issuer_cert.subject:
-        return {
-            "status": "FAILED",
-            "details": (
-                "Issuer subject does not match certificate issuer."
-            ),
-        }
-
-    key = issuer_cert.public_key()
-
+    data = path.read_bytes()
     try:
-        signature = cert.signature
-        data = cert.tbs_certificate_bytes
+        return x509.load_pem_x509_certificate(data)
+    except ValueError:
+        try:
+            return x509.load_der_x509_certificate(data)
+        except ValueError as exc:
+            raise ValueError(
+                "Invalid certificate file or unsupported format."
+            ) from exc
+
+
+def load_certificates(path):
+    """Load certificates from a PEM bundle or a DER certificate."""
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"File not found: {path}")
+
+    data = path.read_bytes()
+    marker = b"-----BEGIN CERTIFICATE-----"
+    end_marker = b"-----END CERTIFICATE-----"
+
+    if marker not in data:
+        try:
+            return [x509.load_der_x509_certificate(data)]
+        except ValueError as exc:
+            raise ValueError("Invalid certificate file.") from exc
+
+    certificates = []
+    remaining = data
+
+    while marker in remaining:
+        start = remaining.find(marker)
+        end = remaining.find(end_marker, start)
+
+        if end == -1:
+            raise ValueError("Invalid PEM certificate bundle.")
+
+        end += len(end_marker)
+        certificates.append(
+            x509.load_pem_x509_certificate(remaining[start:end])
+        )
+        remaining = remaining[end:]
+
+    if not certificates:
+        raise ValueError("No certificates found in the file.")
+
+    return certificates
+
+
+def verify_signature(cert, issuer_path=None):
+    """Verify a certificate signature using its issuer public key."""
+    try:
+        if isinstance(issuer_path, (str, Path)):
+            issuers = load_certificates(issuer_path)
+            issuer = next(
+                (item for item in issuers if item.subject == cert.issuer),
+                None,
+            )
+        elif issuer_path is not None:
+            issuer = (
+                issuer_path
+                if issuer_path.subject == cert.issuer
+                else None
+            )
+        else:
+            issuer = cert if cert.subject == cert.issuer else None
+
+        if issuer is None:
+            return {
+                "status": "FAILED",
+                "details": "Issuer certificate was not provided or does not match.",
+            }
+
+        key = issuer.public_key()
+        algorithm = cert.signature_hash_algorithm
 
         if isinstance(key, rsa.RSAPublicKey):
-            parameters = cert.signature_algorithm_parameters
-            algorithm = cert.signature_hash_algorithm
-
-            if parameters is None or algorithm is None:
-                return {
-                    "status": "NOT CHECKED",
-                    "details": "RSA signature parameters are unavailable.",
-                }
-
-            key.verify(signature, data, parameters, algorithm)
-
+            if cert.signature_algorithm_oid.dotted_string == "1.2.840.113549.1.1.10":
+                key.verify(
+                    cert.signature,
+                    cert.tbs_certificate_bytes,
+                    padding.PSS(
+                        mgf=padding.MGF1(algorithm),
+                        salt_length=padding.PSS.MAX_LENGTH,
+                    ),
+                    algorithm,
+                )
+            else:
+                key.verify(
+                    cert.signature,
+                    cert.tbs_certificate_bytes,
+                    padding.PKCS1v15(),
+                    algorithm,
+                )
         elif isinstance(key, ec.EllipticCurvePublicKey):
-            parameters = cert.signature_algorithm_parameters
-
-            if parameters is None:
-                algorithm = cert.signature_hash_algorithm
-                if algorithm is None:
-                    return {
-                        "status": "NOT CHECKED",
-                        "details": "ECDSA signature parameters are unavailable.",
-                    }
-                parameters = ec.ECDSA(algorithm)
-
-            key.verify(signature, data, parameters)
-
-        elif isinstance(key, dsa.DSAPublicKey):
-            algorithm = cert.signature_hash_algorithm
-            if algorithm is None:
-                return {
-                    "status": "NOT CHECKED",
-                    "details": "DSA signature hash is unavailable.",
-                }
-            key.verify(signature, data, algorithm)
-
+            key.verify(
+                cert.signature,
+                cert.tbs_certificate_bytes,
+                ec.ECDSA(algorithm),
+            )
         elif isinstance(key, (ed25519.Ed25519PublicKey, ed448.Ed448PublicKey)):
-            key.verify(signature, data)
-
+            key.verify(cert.signature, cert.tbs_certificate_bytes)
         else:
             return {
                 "status": "NOT CHECKED",
-                "details": "Unsupported issuer public-key algorithm.",
+                "details": "Unsupported public-key algorithm.",
             }
 
         return {
@@ -144,50 +155,14 @@ def verify_signature(cert, issuer_cert=None):
             "details": "Certificate signature is valid.",
         }
 
-    except InvalidSignature:
-        return {
-            "status": "FAILED",
-            "details": "Certificate signature is invalid.",
-        }
-    except (ValueError, TypeError, NotImplementedError) as error:
-        return {
-            "status": "FAILED",
-            "details": f"Signature verification error: {error}",
-        }
-
-
-def dns_name_matches(hostname, certificate_name):
-    """Match a DNS hostname, including a single-label wildcard."""
-    hostname = hostname.rstrip(".").lower()
-    certificate_name = certificate_name.rstrip(".").lower()
-
-    if "*" not in certificate_name:
-        return hostname == certificate_name
-
-    # Only allow a wildcard as the complete leftmost label.
-    if not certificate_name.startswith("*."):
-        return False
-
-    if certificate_name.count("*") != 1:
-        return False
-
-    hostname_labels = hostname.split(".")
-    certificate_labels = certificate_name.split(".")
-
-    return (
-        len(hostname_labels) == len(certificate_labels)
-        and hostname_labels[1:] == certificate_labels[1:]
-        and bool(hostname_labels[0])
-    )
+    except (OSError, ValueError, TypeError, Exception) as exc:
+        return {"status": "FAILED", "details": str(exc)}
 
 
 def verify_hostname(cert, hostname):
-    """Check a DNS hostname or IP address against the certificate SAN."""
+    """Verify the requested DNS name or IP against Subject Alternative Name."""
     if not hostname:
-        return {
-            "status": "NOT CHECKED",
-            "details": "No hostname provided.",
-        }
+        return {"status": "NOT CHECKED", "details": "No hostname provided."}
 
     try:
         san = cert.extensions.get_extension_for_class(
@@ -196,40 +171,38 @@ def verify_hostname(cert, hostname):
     except x509.ExtensionNotFound:
         return {
             "status": "FAILED",
-            "details": "Certificate has no Subject Alternative Name (SAN).",
+            "details": "Certificate has no subjectAltName extension.",
         }
 
     try:
-        ip_address = ipaddress.ip_address(hostname)
+        requested_ip = ipaddress.ip_address(hostname)
     except ValueError:
-        ip_address = None
+        requested_ip = None
 
-    if ip_address is not None:
-        certificate_addresses = san.get_values_for_type(x509.IPAddress)
+    if requested_ip is not None:
+        matches = requested_ip in san.get_values_for_type(x509.IPAddress)
+    else:
+        requested = hostname.rstrip(".").lower()
+        dns_names = san.get_values_for_type(x509.DNSName)
+        matches = any(
+            requested == name.rstrip(".").lower()
+            or (
+                name.startswith("*.")
+                and requested.endswith(name[1:].lower())
+                and requested.count(".") == name.count(".")
+            )
+            for name in dns_names
+        )
 
-        if ip_address in certificate_addresses:
-            return {
-                "status": "PASSED",
-                "details": f"IP address {hostname} matches the certificate SAN.",
-            }
-
+    if matches:
         return {
-            "status": "FAILED",
-            "details": f"No matching IP SAN for {hostname}.",
+            "status": "PASSED",
+            "details": f"Certificate matches hostname {hostname}.",
         }
-
-    dns_names = san.get_values_for_type(x509.DNSName)
-
-    for certificate_name in dns_names:
-        if dns_name_matches(hostname, certificate_name):
-            return {
-                "status": "PASSED",
-                "details": f"Hostname {hostname} matches the certificate SAN.",
-            }
 
     return {
         "status": "FAILED",
-        "details": f"No matching DNS SAN for {hostname}.",
+        "details": f"No matching DNS SAN or IP SAN for {hostname}.",
     }
 
 
@@ -239,43 +212,46 @@ def verify_certificate_chain(
     issuer_path=None,
     roots_path=None,
 ):
-    """Validate a server certificate against a trusted root store."""
-    if not hostname:
-        return {
-            "status": "NOT CHECKED",
-            "details": (
-                "A hostname is required for server certificate chain validation."
-            ),
-        }
-
+    """Verify the certificate against a trusted root store."""
     try:
-        # Use the supplied trust bundle or the default certifi bundle.
-        root_path = roots_path if roots_path else certifi.where()
+        root_path = roots_path or certifi.where()
         trusted_roots = load_certificates(root_path)
 
         if not trusted_roots:
             return {
                 "status": "FAILED",
-                "details": "The trusted root certificate bundle is empty.",
+                "details": "Trusted root bundle is empty.",
             }
 
-        # Load any supplied issuer/intermediate certificates.
         intermediates = []
         if issuer_path:
-            intermediates = load_certificates(issuer_path)
+            if isinstance(issuer_path, (str, Path)):
+                intermediates = load_certificates(issuer_path)
+            else:
+                intermediates = [issuer_path]
 
-        # PolicyBuilder requires the expected DNS name or IP address.
-        try:
-            subject = x509.IPAddress(ipaddress.ip_address(hostname))
-        except ValueError:
-            subject = x509.DNSName(hostname)
+        # Keep hostname matching separately reportable.
+        san = cert.extensions.get_extension_for_class(
+            x509.SubjectAlternativeName
+        ).value
+        dns_names = san.get_values_for_type(x509.DNSName)
+        ip_names = san.get_values_for_type(x509.IPAddress)
+
+        if dns_names:
+            identity = x509.DNSName(dns_names[0])
+        elif ip_names:
+            identity = x509.IPAddress(ip_names[0])
+        else:
+            return {
+                "status": "FAILED",
+                "details": "Certificate has no DNS or IP subjectAltName.",
+            }
 
         verifier = (
             PolicyBuilder()
             .store(Store(trusted_roots))
-            .build_server_verifier(subject)
+            .build_server_verifier(identity)
         )
-
         verified_chain = verifier.verify(cert, intermediates)
 
         return {
@@ -286,231 +262,141 @@ def verify_certificate_chain(
             ),
         }
 
-    except VerificationError as error:
-        return {
-            "status": "FAILED",
-            "details": str(error),
-        }
-    except (OSError, ValueError, TypeError, NotImplementedError) as error:
-        return {
-            "status": "FAILED",
-            "details": str(error),
-        }
+    except FileNotFoundError:
+        raise
+    except Exception as exc:
+        return {"status": "FAILED", "details": str(exc)}
 
 
 def get_validity_status(cert):
-    """Determine whether the certificate is currently within its validity period."""
+    """Return the certificate validity state."""
+    not_before = getattr(cert, "not_valid_before_utc", None)
+    not_after = getattr(cert, "not_valid_after_utc", None)
+
+    if not_before is None:
+        not_before = cert.not_valid_before.replace(tzinfo=timezone.utc)
+    if not_after is None:
+        not_after = cert.not_valid_after.replace(tzinfo=timezone.utc)
+
     now = datetime.now(timezone.utc)
 
-    if now < cert.not_valid_before_utc:
+    if now < not_before:
         return "NOT YET VALID"
-
-    if now > cert.not_valid_after_utc:
+    if now > not_after:
         return "EXPIRED"
-
     return "WITHIN VALIDITY DATES"
 
 
-def parse_certificate(
-    file_path,
-    hostname=None,
-    issuer_path=None,
-    roots_path=None,
-):
-    """Parse a certificate, run validation checks, and export a JSON report."""
-    path = Path(file_path)
-
-    if not path.is_file():
-        print(f"Error: File not found: {path}")
-        return 1
-
-    try:
-        cert = load_certificate(path)
-    except (OSError, ValueError, TypeError) as error:
-        print(f"Error loading PEM certificate: {error}")
-        return 1
-
-    issuer_cert = None
-
-    if issuer_path:
-        try:
-            issuer_cert = load_certificate(issuer_path)
-        except (OSError, ValueError, TypeError) as error:
-            print(f"Error loading issuer certificate: {error}")
-            return 1
-
-    try:
-        key_details = get_public_key_details(cert.public_key())
-        signature_hash = cert.signature_hash_algorithm
-    except (ValueError, TypeError, NotImplementedError) as error:
-        print(f"Error reading certificate details: {error}")
-        return 1
-
-    validity_status = get_validity_status(cert)
-
-    signature_result = verify_signature(cert, issuer_cert)
-
-    hostname_result = (
-        verify_hostname(cert, hostname)
-        if hostname
-        else {
-            "status": "NOT CHECKED",
-            "details": "No hostname provided.",
-        }
-    )
-
-    chain_result = verify_certificate_chain(
-        cert,
-        hostname,
-        issuer_path,
-        roots_path,
-    )
-
-    dns_names = []
-    ip_addresses = []
-
+def certificate_details(cert):
+    """Collect certificate details for the JSON report."""
     try:
         san = cert.extensions.get_extension_for_class(
             x509.SubjectAlternativeName
         ).value
-
         dns_names = san.get_values_for_type(x509.DNSName)
         ip_addresses = [
-            str(address)
-            for address in san.get_values_for_type(x509.IPAddress)
+            str(value) for value in san.get_values_for_type(x509.IPAddress)
         ]
     except x509.ExtensionNotFound:
-        pass
+        dns_names = []
+        ip_addresses = []
 
-    print("\n===== X.509 CERTIFICATE DETAILS =====")
-    print(f"File: {path.name}")
-    print(f"Version: {cert.version.name}")
-    print(f"Serial Number: {cert.serial_number}")
-    print(f"Subject: {get_name(cert.subject)}")
-    print(f"Issuer: {get_name(cert.issuer)}")
+    not_before = getattr(cert, "not_valid_before_utc", None)
+    not_after = getattr(cert, "not_valid_after_utc", None)
 
-    print("\n--- Validity Period ---")
-    print(f"Valid From: {cert.not_valid_before_utc}")
-    print(f"Valid Until: {cert.not_valid_after_utc}")
-    print(f"Status: {validity_status}")
+    if not_before is None:
+        not_before = cert.not_valid_before.replace(tzinfo=timezone.utc)
+    if not_after is None:
+        not_after = cert.not_valid_after.replace(tzinfo=timezone.utc)
 
-    print("\n--- Public Key Details ---")
-    for field, value in key_details.items():
-        if value is not None:
-            print(f"{field.replace('_', ' ').title()}: {value}")
-
-    print("\n--- Signature ---")
-    print(f"Signature Algorithm: {cert.signature_algorithm_oid._name}")
-    print(
-        "Signature Hash: "
-        f"{signature_hash.name if signature_hash else 'Not applicable'}"
-    )
-
-    print("\n--- Subject Alternative Names ---")
-    for name in dns_names:
-        print(f"DNS: {name}")
-
-    for address in ip_addresses:
-        print(f"IP Address: {address}")
-
-    if not dns_names and not ip_addresses:
-        print("No DNS or IP SAN entries found.")
-
-    print("\n--- Security Validation ---")
-
-    validation_items = [
-        ("Signature Verification", signature_result),
-        ("Hostname Verification", hostname_result),
-        ("Certificate Chain", chain_result),
-    ]
-
-    for label, result in validation_items:
-        print(f"{label}: {result['status']} - {result['details']}")
-
-    report = {
-        "file": path.name,
-        "version": cert.version.name,
-        "serial_number": str(cert.serial_number),
+    return {
         "subject": get_name(cert.subject),
         "issuer": get_name(cert.issuer),
-        "valid_from": cert.not_valid_before_utc.isoformat(),
-        "valid_until": cert.not_valid_after_utc.isoformat(),
-        "validity_status": validity_status,
-        "public_key": key_details,
-        "signature_algorithm": cert.signature_algorithm_oid._name,
-        "signature_hash": (
-            signature_hash.name if signature_hash else None
+        "serial_number": str(cert.serial_number),
+        "not_before": not_before.isoformat(),
+        "not_after": not_after.isoformat(),
+        "signature_algorithm": (
+            cert.signature_hash_algorithm.name
+            if cert.signature_hash_algorithm
+            else "Unknown"
         ),
-        "subject_alternative_names": {
-            "dns": dns_names,
-            "ip_addresses": ip_addresses,
-        },
-        "validation": {
-            "signature": signature_result,
-            "hostname": hostname_result,
-            "chain": chain_result,
-        },
+        "public_key": get_public_key_details(cert),
+        "dns_names": dns_names,
+        "ip_addresses": ip_addresses,
     }
 
-    report_path = path.with_name(f"{path.stem}_report.json")
+
+def main():
+    cli = argparse.ArgumentParser(
+        description="X.509 Certificate Parser and Validator"
+    )
+    cli.add_argument("certificate", help="Certificate file path")
+    cli.add_argument("--hostname", help="Expected hostname or IP address")
+    cli.add_argument("--issuer", help="Issuer or intermediate certificate")
+    cli.add_argument("--roots", help="Trusted root certificate or PEM bundle")
+    args = cli.parse_args()
 
     try:
+        cert = load_certificate(args.certificate)
+
+        signature = verify_signature(cert, args.issuer)
+        hostname = verify_hostname(cert, args.hostname)
+        chain = verify_certificate_chain(
+            cert, args.hostname, args.issuer, args.roots
+        )
+        validity = get_validity_status(cert)
+
+        results = {
+            "signature": signature,
+            "hostname": hostname,
+            "chain": chain,
+        }
+        passed = (
+            validity == "WITHIN VALIDITY DATES"
+            and all(item["status"] == "PASSED" for item in results.values())
+        )
+
+        report = {
+            "file": Path(args.certificate).name,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "validity_status": validity,
+            "certificate_details": certificate_details(cert),
+            "validation": results,
+            "overall_result": "PASSED" if passed else "FAILED",
+        }
+
+        report_path = Path(args.certificate).with_name(
+            f"{Path(args.certificate).stem}_report.json"
+        )
         report_path.write_text(
             json.dumps(report, indent=4),
             encoding="utf-8",
         )
-        print(f"\nJSON report saved to: {report_path}")
-    except OSError as error:
-        print(f"Could not save JSON report: {error}")
+
+        print("\n========== X.509 CERTIFICATE VALIDATION ==========")
+        print(f"Certificate: {args.certificate}")
+        print(f"Validity: {validity}")
+        print(f"Signature Verification: {signature['status']}")
+        print(f"  Details: {signature['details']}")
+        print(f"Hostname Verification: {hostname['status']}")
+        print(f"  Details: {hostname['details']}")
+        print(f"Certificate Chain: {chain['status']}")
+        print(f"  Details: {chain['details']}")
+        print(f"Overall Result: {'PASSED' if passed else 'FAILED'}")
+        print(f"JSON Report: {report_path}")
+        print("\nCertificate Details")
+        print(f"  Subject: {get_name(cert.subject)}")
+        print(f"  Issuer: {get_name(cert.issuer)}")
+        print(f"  Serial Number: {cert.serial_number}")
+        print(f"  DNS SANs: {', '.join(certificate_details(cert)['dns_names']) or 'None'}")
+        print(f"  IP SANs: {', '.join(certificate_details(cert)['ip_addresses']) or 'None'}")
+
+        return 0 if passed else 1
+
+    except (FileNotFoundError, ValueError, OSError) as exc:
+        print(f"Error: {exc}")
         return 1
-
-    # NOT CHECKED is distinct from FAILED. A check that was not requested
-    # does not automatically mean that the certificate failed validation.
-    validation_failed = any(
-        result["status"] == "FAILED"
-        for _, result in validation_items
-    )
-
-    validity_failed = validity_status != "WITHIN VALIDITY DATES"
-
-    if validation_failed or validity_failed:
-        print("\nOverall Result: FAILED")
-        print("Certificate analysis completed with validation failures.")
-        return 1
-
-    print("\nOverall Result: PASSED")
-    print("Certificate analysis completed.")
-    return 0
 
 
 if __name__ == "__main__":
-    cli = argparse.ArgumentParser(
-        description="X.509 Certificate Parser and Validator"
-    )
-    cli.add_argument(
-        "certificate",
-        help="Path to a PEM certificate",
-    )
-    cli.add_argument(
-        "--hostname",
-        help="Expected DNS hostname or IP address",
-    )
-    cli.add_argument(
-        "--issuer",
-        help="Optional issuer/intermediate PEM certificate",
-    )
-    cli.add_argument(
-        "--roots",
-        help="Optional trusted root PEM bundle",
-    )
-
-    args = cli.parse_args()
-
-    exit_code = parse_certificate(
-        args.certificate,
-        hostname=args.hostname,
-        issuer_path=args.issuer,
-        roots_path=args.roots,
-    )
-
-    sys.exit(exit_code)
+    sys.exit(main())

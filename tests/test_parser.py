@@ -58,7 +58,7 @@ def test_valid_certificate_and_chain():
 
 
 def test_wrong_hostname_is_rejected():
-    """A hostname that does not match the certificate SAN should fail."""
+    """A wrong hostname fails without invalidating a trusted chain."""
     result = run_parser(
         "server_certificate.pem",
         "--hostname", "example.com",
@@ -66,9 +66,12 @@ def test_wrong_hostname_is_rejected():
         "--roots", "root_ca.pem",
     )
 
-    assert result.returncode == 1
+    assert result.returncode == 1, (
+        f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+    )
+    assert "Signature Verification: PASSED" in result.stdout
     assert "Hostname Verification: FAILED" in result.stdout
-    assert "Certificate Chain: FAILED" in result.stdout
+    assert "Certificate Chain: PASSED" in result.stdout
     assert "Overall Result: FAILED" in result.stdout
 
 
@@ -81,7 +84,10 @@ def test_untrusted_root_is_rejected():
         "--roots", "certificate.pem",
     )
 
-    assert result.returncode == 1
+    assert result.returncode == 1, (
+        f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+    )
+    assert "Signature Verification: PASSED" in result.stdout
     assert "Hostname Verification: PASSED" in result.stdout
     assert "Certificate Chain: FAILED" in result.stdout
     assert "Overall Result: FAILED" in result.stdout

@@ -16,9 +16,10 @@ from parser import (
     verify_signature,
 )
 
-app = Flask(__name__)
+from cryptography import x509
 
-app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024  # 2 MB upload limit
+app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024
 
 ALLOWED_EXTENSIONS = {".pem", ".crt", ".cer"}
 REPORT_DIR = Path(tempfile.gettempdir()) / "x509-parser-reports"
@@ -46,16 +47,13 @@ def validate_certificate():
 
     if not allowed_file(certificate_file.filename):
         return jsonify({
-            "error": "Unsupported certificate file type. Upload a PEM, CRT, or CER file."
+            "error": "Unsupported certificate file type. Upload PEM, CRT, or CER."
         }), 400
 
     temp_paths = []
 
     try:
-        # Save uploaded files temporarily; never execute uploaded content.
-        with tempfile.NamedTemporaryFile(
-            suffix=".pem", delete=False
-        ) as temporary:
+        with tempfile.NamedTemporaryFile(suffix=".pem", delete=False) as temporary:
             certificate_file.save(temporary)
             certificate_path = Path(temporary.name)
             temp_paths.append(certificate_path)
@@ -86,10 +84,8 @@ def validate_certificate():
 
         cert = load_certificate(certificate_path)
 
-        signature_result = verify_signature(
-            cert,
-            load_certificate(issuer_path) if issuer_path else None,
-        )
+        issuer_cert = load_certificate(issuer_path) if issuer_path else None
+        signature_result = verify_signature(cert, issuer_cert)
 
         hostname_result = (
             verify_hostname(cert, hostname)
@@ -109,24 +105,15 @@ def validate_certificate():
 
         try:
             san = cert.extensions.get_extension_for_class(
-                __import__("cryptography").x509.SubjectAlternativeName
+                x509.SubjectAlternativeName
             ).value
-            dns_names = san.get_values_for_type(
-                __import__("cryptography").x509.DNSName
-            )
+            dns_names = san.get_values_for_type(x509.DNSName)
             ip_addresses = [
                 str(address)
-                for address in san.get_values_for_type(
-                    __import__("cryptography").x509.IPAddress
-                )
+                for address in san.get_values_for_type(x509.IPAddress)
             ]
-        except Exception as error:
-            from cryptography.x509 import ExtensionNotFound
-
-            if isinstance(error, ExtensionNotFound):
-                dns_names, ip_addresses = [], []
-            else:
-                raise
+        except x509.ExtensionNotFound:
+            dns_names, ip_addresses = [], []
 
         signature_hash = cert.signature_hash_algorithm
         validity_status = get_validity_status(cert)
@@ -137,11 +124,19 @@ def validate_certificate():
             "chain": chain_result,
         }
 
-        # A skipped check is not proof of successful validation.
         fully_validated = (
             validity_status == "WITHIN VALIDITY DATES"
-            and all(item["status"] == "PASSED" for item in checks.values())
+            and all(result["status"] == "PASSED" for result in checks.values())
         )
+
+        public_key = get_public_key_details(cert)
+        if not isinstance(public_key, dict):
+            public_key = {
+                "algorithm": type(cert.public_key()).__name__,
+                "type": type(cert.public_key()).__name__,
+            }
+
+        public_key.setdefault("algorithm", public_key.get("type", "Unknown"))
 
         report = {
             "file": secure_filename(certificate_file.filename),
@@ -152,7 +147,7 @@ def validate_certificate():
             "valid_from": cert.not_valid_before_utc.isoformat(),
             "valid_until": cert.not_valid_after_utc.isoformat(),
             "validity_status": validity_status,
-            "public_key": get_public_key_details(cert.public_key()),
+            "public_key": public_key,
             "signature_algorithm": cert.signature_algorithm_oid._name,
             "signature_hash": signature_hash.name if signature_hash else None,
             "subject_alternative_names": {
@@ -160,11 +155,7 @@ def validate_certificate():
                 "ip_addresses": ip_addresses,
             },
             "validation": checks,
-            "overall_status": (
-                "PASSED"
-                if fully_validated
-                else "FAILED"
-            ),
+            "overall_status": "PASSED" if fully_validated else "FAILED",
             "note": (
                 "PASSED means all checks ran and passed. "
                 "NOT CHECKED does not establish trust."
@@ -172,7 +163,10 @@ def validate_certificate():
         }
 
         report_path = REPORT_DIR / "certificate_report.json"
-        report_path.write_text(json.dumps(report, indent=4), encoding="utf-8")
+        report_path.write_text(
+            json.dumps(report, indent=4),
+            encoding="utf-8",
+        )
 
         return jsonify({
             "report": report,
@@ -180,9 +174,16 @@ def validate_certificate():
         })
 
     except (OSError, ValueError, TypeError) as error:
+        app.logger.exception("Certificate validation failed")
         return jsonify({
             "error": f"Could not process certificate: {error}"
         }), 400
+
+    except Exception:
+        app.logger.exception("Unexpected validation error")
+        return jsonify({
+            "error": "An unexpected error occurred while validating the certificate. Check the Flask terminal."
+        }), 500
 
     finally:
         for path in temp_paths:
@@ -197,7 +198,9 @@ def download_report():
     report_path = REPORT_DIR / "certificate_report.json"
 
     if not report_path.is_file():
-        return jsonify({"error": "No report is available. Validate a certificate first."}), 404
+        return jsonify({
+            "error": "No report is available. Analyze a certificate first."
+        }), 404
 
     return send_file(
         report_path,
@@ -209,7 +212,9 @@ def download_report():
 
 @app.errorhandler(413)
 def upload_too_large(_error):
-    return jsonify({"error": "Upload is too large. Maximum size is 2 MB."}), 413
+    return jsonify({
+        "error": "Upload is too large. Maximum size is 2 MB."
+    }), 413
 
 
 if __name__ == "__main__":

@@ -14,8 +14,9 @@ function setCheck(name, result) {
     const detailsElement = document.getElementById(`${name}-details`);
 
     statusElement.textContent = result.status;
-    statusElement.className = `status-${result.status.toLowerCase().replaceAll(" ", "-")}`;
-    detailsElement.textContent = result.details;
+    statusElement.className =
+        `status-${result.status.toLowerCase().replaceAll(" ", "-")}`;
+    detailsElement.textContent = result.details || "No additional details.";
 }
 
 function addDetail(list, label, value) {
@@ -23,7 +24,10 @@ function addDetail(list, label, value) {
     term.textContent = label;
 
     const description = document.createElement("dd");
-    description.textContent = value ?? "Not available";
+    description.textContent =
+        value === null || value === undefined || value === ""
+            ? "Not available"
+            : String(value);
 
     list.append(term, description);
 }
@@ -32,20 +36,36 @@ form.addEventListener("submit", async (event) => {
     event.preventDefault();
 
     results.classList.add("hidden");
-    showMessage("Analyzing certificate…");
+    showMessage("Analyzing certificate...", "");
     submitButton.disabled = true;
-    submitButton.textContent = "Analyzing…";
+    submitButton.textContent = "Analyzing...";
 
     try {
         const response = await fetch("/api/validate", {
             method: "POST",
             body: new FormData(form),
+            headers: { Accept: "application/json" },
         });
 
-        const data = await response.json();
+        const contentType = response.headers.get("content-type") || "";
+        let data;
+
+        if (contentType.includes("application/json")) {
+            data = await response.json();
+        } else {
+            const body = await response.text();
+            console.error("Unexpected server response:", body);
+            throw new Error(
+                `The server returned a non-JSON response (HTTP ${response.status}). Check the Flask terminal.`
+            );
+        }
 
         if (!response.ok) {
-            throw new Error(data.error || "Certificate analysis failed.");
+            throw new Error(data.error || `Request failed (${response.status}).`);
+        }
+
+        if (!data.report || !data.report.validation) {
+            throw new Error("The server response is missing validation results.");
         }
 
         const report = data.report;
@@ -75,11 +95,15 @@ form.addEventListener("submit", async (event) => {
         addDetail(details, "Valid from", report.valid_from);
         addDetail(details, "Valid until", report.valid_until);
         addDetail(details, "Validity", report.validity_status);
-        addDetail(details, "Public key", report.public_key.algorithm);
+        addDetail(
+            details,
+            "Public key",
+            report.public_key?.algorithm || report.public_key?.type
+        );
         addDetail(
             details,
             "Key size",
-            report.public_key.key_size
+            report.public_key?.key_size
                 ? `${report.public_key.key_size} bits`
                 : "Not applicable"
         );
@@ -89,25 +113,30 @@ form.addEventListener("submit", async (event) => {
         const san = document.getElementById("san-details");
         san.replaceChildren();
 
-        const dnsText = report.subject_alternative_names.dns;
-        const ipText = report.subject_alternative_names.ip_addresses;
+        const dnsNames = report.subject_alternative_names?.dns || [];
+        const ipAddresses = report.subject_alternative_names?.ip_addresses || [];
 
         const sanLines = [
-            ...dnsText.map((name) => `DNS: ${name}`),
-            ...ipText.map((address) => `IP: ${address}`),
+            ...dnsNames.map((name) => `DNS: ${name}`),
+            ...ipAddresses.map((address) => `IP: ${address}`),
         ];
 
         san.textContent = sanLines.length
             ? sanLines.join(" · ")
             : "No DNS or IP SAN entries found.";
 
-        document.getElementById("download-link").href = data.download_url;
+        document.getElementById("download-link").href =
+            data.download_url || "/api/report";
 
         results.classList.remove("hidden");
         showMessage("Certificate analysis finished.", "success");
         results.scrollIntoView({ behavior: "smooth", block: "start" });
     } catch (error) {
-        showMessage(error.message || "Unable to contact the local server.", "error");
+        console.error("Certificate analysis error:", error);
+        showMessage(
+            error.message || "Unable to contact the local server.",
+            "error"
+        );
     } finally {
         submitButton.disabled = false;
         submitButton.innerHTML = 'Analyze certificate <span>→</span>';
